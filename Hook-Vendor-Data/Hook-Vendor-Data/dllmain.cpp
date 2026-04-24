@@ -23,11 +23,7 @@ GetCurrentVendorEnvDataFunc originalGetCurrentVendor = nullptr;
 
 bool hooksInstalled = false;
 uintptr_t g_GetCurrentVendorAddr = 0;
-
-extern "C" __declspec(dllexport) void SetHookAddress(uintptr_t address) {
-    g_GetCurrentVendorAddr = address;
-    printf("[*] Hook Address received from Injector: 0x%p\n", (void*)address);
-}
+extern "C" __declspec(dllexport) uintptr_t g_HookAddressVar = 0;
 
 struct Il2CppString
 {
@@ -220,6 +216,7 @@ void* __fastcall HookedGetCurrentVendorEnvData(void* unused)
         result = originalGetCurrentVendor(unused);
     }
     SaveVendorEnvDataToFile(result, "CurrentVendorEnvData.json");
+	printf("[*] GetCurrentVendorEnvData called, data saved to CurrentVendorEnvData.json\n");
     return result;
 }
 
@@ -235,6 +232,8 @@ uintptr_t CalculateFunctionAddress(HMODULE module, uintptr_t rvaOffset)
 
 bool InstallHooks()
 {
+    printf("[+] Try installing hook...\n");
+
     const char* possibleModuleNames[] = {
         "GameAssembly.dll",
         "UnityPlayer.dll",
@@ -252,8 +251,12 @@ bool InstallHooks()
 
     if (!targetModule)
     {
+        printf("[+] Waiting for GameAssembly.dll module to load...\n");
+        printf("========================================\n");
+
         int attempts = 0;
         const int maxAttempts = 200;
+
         while (!targetModule && attempts < maxAttempts)
         {
             targetModule = GetModuleHandleA("GameAssembly.dll");
@@ -261,25 +264,67 @@ bool InstallHooks()
             {
                 Sleep(100);
                 attempts++;
+
+                if (attempts % 20 == 0)
+                {
+                    printf("  Waiting... (%d/%d)\n", attempts, maxAttempts);
+                }
             }
         }
     }
 
     if (!targetModule)
+    {
+        printf("[-] Error: Failed to find target module\n");
         return false;
+    }
 
     uintptr_t targetAddress = g_GetCurrentVendorAddr;
     if (targetAddress == 0) {
+        printf("[+] No input address, using default address calculation");
         targetAddress = CalculateFunctionAddress(targetModule, GETCURRENTVENDOR_RVA);
         if (!targetAddress)
         {
             targetAddress = GETCURRENTVENDOR_ABSOLUTE;
             if (IsBadReadPtr((void*)targetAddress, 4))
             {
-                printf("[!] Error: Hook address is not set! Please call SetHookAddress first.\n");
+                printf("[!] Error: Hook address is not set!\n");
                 return false;
             }
         }
+    }
+    else
+    {
+        if (targetAddress < 0x10000000) {
+            printf("[*] Detected RVA offset. Adding module base...\n");
+            targetAddress = (uintptr_t)targetModule + targetAddress;
+        }
+        else {
+            printf("[*] Detected Absolute Address. Using directly.\n");
+        }
+    }
+
+    printf("[+] Final Target Address: 0x%p\n", (void*)targetAddress);
+    
+    printf("[*] Checking target bytes at 0x%p: ", (void*)targetAddress);
+    unsigned char* pBytes = (unsigned char*)targetAddress;
+    if (IsBadReadPtr(pBytes, 16)) {
+        printf("\n[-] Error: Target address is unreadable! (Access Violation)\n");
+        return false;
+    }
+
+    for (int i = 0; i < 16; i++) {
+        printf("%02X ", pBytes[i]);
+    }
+    printf("\n");
+
+    bool isEmpty = true;
+    for (int i = 0; i < 16; i++) {
+        if (pBytes[i] != 0x00 && pBytes[i] != 0xCC) { isEmpty = false; break; }
+    }
+    if (isEmpty) {
+        printf("[-] Error: Target memory is empty (00 or CC). Wrong address!\n");
+        return false;
     }
 
     printf("[*] Installing hook at address: 0x%p\n", (void*)targetAddress);
@@ -315,18 +360,34 @@ void CleanupHooks()
     }
 }
 
-DWORD WINAPI HookInstallationThread(LPVOID lpParam)
+void CreateConsole()
 {
     AllocConsole();
+
     FILE* fp;
     freopen_s(&fp, "CONOUT$", "w", stdout);
     freopen_s(&fp, "CONOUT$", "w", stderr);
     freopen_s(&fp, "CONIN$", "r", stdin);
+
     SetConsoleTitleA("StellaSora Hook Console");
+
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
+}
+
+DWORD WINAPI HookInstallationThread(LPVOID lpParam)
+{
+    CreateConsole();
 
     printf("[*] Hook installation thread started\n");
+    printf("[*] Waiting for global variable...\n");
+
+    while (g_HookAddressVar == 0) {
+        Sleep(10);
+    }
+
+    printf("[+] Address received via global var: 0x%p\n", (void*)g_HookAddressVar);
+    g_GetCurrentVendorAddr = g_HookAddressVar;
 
     bool success = InstallHooks();
 
